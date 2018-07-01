@@ -1,4 +1,5 @@
 import org.apache.commons.io.FileUtils;
+import org.deeplearning4j.api.storage.StatsStorage;
 import org.deeplearning4j.nn.conf.BackpropType;
 import org.deeplearning4j.nn.conf.MultiLayerConfiguration;
 import org.deeplearning4j.nn.conf.NeuralNetConfiguration;
@@ -6,7 +7,9 @@ import org.deeplearning4j.nn.conf.layers.LSTM;
 import org.deeplearning4j.nn.conf.layers.RnnOutputLayer;
 import org.deeplearning4j.nn.multilayer.MultiLayerNetwork;
 import org.deeplearning4j.nn.weights.WeightInit;
-import org.deeplearning4j.optimize.listeners.ScoreIterationListener;
+import org.deeplearning4j.ui.api.UIServer;
+import org.deeplearning4j.ui.stats.StatsListener;
+import org.deeplearning4j.ui.storage.InMemoryStatsStorage;
 import org.nd4j.linalg.activations.Activation;
 import org.nd4j.linalg.api.ndarray.INDArray;
 import org.nd4j.linalg.dataset.DataSet;
@@ -25,24 +28,30 @@ public class StoryModeler {
 
     public static void main(String[] args) throws Exception {
 
+        System.out.println("Test");
+
         int lstmLayerSize = 200;        // How many units are in each LSTM layer
-        int miniBatchSize = 32;         //Size of batch to use while training
-        int exampleLength = 1000;       // Length of each training example sequence to use. (Increase this probably)
-        int tbpttLength = 50;           //Truncated backpropigation through time (Do parameter updates every X characters)
-        int numEpochs = 1;              //Number of training epochs
+        int miniBatchSize = 32;        //Size of batch to use while training (Previously 32)
+        int exampleLength = 1500;       // Length of each training example sequence to use. (Increase this probably) (Previously 3000)
+        int tbpttLength = 50;           //Truncated backpropigation through time (Do parameter updates every X characters) (Previous 50)
+        int numEpochs = 30;              //Number of training epochs
         int generateSamplesEveryNMiniBatches = 10;  // How freqeuntly should this generate a sample from the network. (1000 characters / 50 tbptt length: 20 parameter per batch
         int nSamplesToGenerate = 4;        // Number of writing samples to generate after eacy training epoch
-        int nCharactersToSample = 300;      //Length of each sample to generate
+        int nCharactersToSample = 500;      //Length of each sample to generate
         String generalizationInitializeation = null;    //Optional character initialization. Random if null.
 
-        Random rng = new Random(12345);
+        long currTime = System.currentTimeMillis();
+        System.out.println("Using rng-seed of: " + currTime);
+
+        Random rng = new Random(currTime);
 
         // Get a DataSetIterator that handles our network
-        CharacterIterator dataIter = getInputFromFile(miniBatchSize, exampleLength);
+        CharacterIterator dataIter = getInputFromFile(miniBatchSize, exampleLength, currTime);
 
         MultiLayerConfiguration conf = new NeuralNetConfiguration.Builder()
-                .seed(12345)
-                .l2(0.001)
+                .seed(currTime)
+                .l2(0.002)
+                .dropOut(0.5)
                 .weightInit(WeightInit.XAVIER)
                 .updater(new RmsProp(0.1))
                 .list()
@@ -60,7 +69,13 @@ public class StoryModeler {
 
         MultiLayerNetwork net = new MultiLayerNetwork(conf);
         net.init();
-        net.setListeners(new ScoreIterationListener(1));
+        //net.setListeners(new ScoreIterationListener(1));
+        UIServer uiServer = UIServer.getInstance();
+
+        // Configure the data in memory
+        StatsStorage statsStorage = new InMemoryStatsStorage();
+        uiServer.attach(statsStorage);
+        net.setListeners(new StatsListener(statsStorage));
 
         // Print the number of parameters in the network and for each layer
         org.deeplearning4j.nn.api.Layer[] layers = net.getLayers();
@@ -106,34 +121,28 @@ public class StoryModeler {
         System.out.println("Complete");
     }
 
-    public static CharacterIterator getInputFromFile(int miniBatchSize, int seqeuenceLength) throws Exception
+
+    public static CharacterIterator getInputFromFile(int miniBatchSize, int sequenceLength, long rngSeed) throws Exception
     {
-        //The Complete Works of William Shakespeare
-        //5.3MB file in UTF-8 Encoding, ~5.4 million characters
-        //https://www.gutenberg.org/ebooks/100 -- This might be sufficient training data for at least grammar shit
-        String url = "https://s3.amazonaws.com/dl4j-distribution/pg100.txt";
         String tempDir = System.getProperty("java.io.tmpdir");
-        String fileLocation = tempDir + "/Shakespeare.txt";	//Storage location from downloaded file
+        String fileLocation = tempDir + "/LearningFile.txt";
         File f = new File(fileLocation);
-        if( !f.exists() ){
-            FileUtils.copyURLToFile(new URL(url), f);
-            System.out.println("File downloaded to " + f.getAbsolutePath());
-        } else {
-            System.out.println("Using existing text file at " + f.getAbsolutePath());
+
+        if(!f.exists())
+        {
+            System.err.println("Missing file at path: " + f.getAbsolutePath());
         }
 
-        if(!f.exists()) throw new IOException("File does not exist: " + fileLocation);	//Download problem?
-
-        char[] validCharacters = CharacterIterator.getMinimalCharacterSet();	//Which characters are allowed? Others will be removed
+        char[] validCharacters = CharacterIterator.getMinimalCharacterSet();
         return new CharacterIterator(fileLocation, Charset.forName("UTF-8"),
-                miniBatchSize, seqeuenceLength, validCharacters, new Random(12345));
+                miniBatchSize, sequenceLength, validCharacters, new Random(rngSeed));
     }
 
     private static String[] sampleCharactersFromNetwork(String initialization, MultiLayerNetwork net, CharacterIterator iter,
                                                         Random rng, int charactersToSample, int numSamples)
     {
         // Set up init. If none, use a random character
-        if(initialization == null)
+        if(initialization == null || initialization == "")
         {
             initialization = String.valueOf(iter.getRandomCharacter());
         }
